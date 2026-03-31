@@ -4,3 +4,14 @@ __pycache__/
 out
 website/
 docs-minimind/
+dataset/*.jsonl
+dataset/*.json
+out/*.pth
+checkpoints/
+# 奖励模型
+internlm2-1_8b-reward/
+# 虚拟环境
+minimind-env/
+# wandb/swanlab 日志
+wandb/
+swanlab_logs/
