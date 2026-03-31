@@ -15,3 +15,4 @@ minimind-env/
 # wandb/swanlab 日志
 wandb/
 swanlab_logs/
+*.sh
