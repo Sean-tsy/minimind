@@ -228,7 +228,7 @@ if __name__ == "__main__":
     parser.add_argument("--epsilon", type=float, default=0.2, help="GRPO的PPO clip epsilon")
     parser.add_argument("--epsilon_high", type=float, default=5.0, help="epsilon上界")
     parser.add_argument('--from_weight', default='full_sft', type=str, help="基于哪个权重训练")
-    parser.add_argument("--reward_model_path", type=str, default="../../internlm2-1_8b-reward", help="Reward模型路径")
+    parser.add_argument("--reward_model_path", type=str, default="../dataset/internlm2-1_8b-reward", help="Reward模型路径")
     parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
     parser.add_argument("--wandb_project", type=str, default="MiniMind-GRPO", help="wandb项目名")
