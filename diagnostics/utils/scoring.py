@@ -1,19 +1,23 @@
 """
-Module 1.3: LLM-based Scoring via Gemini API
-用 Gemini 对4个阶段 × 15条 prompt 的推理结果进行5维度自动评分。
+Gemini-based LLM Scoring Utility — 独立评分脚本
+用 Gemini 对批量推理结果进行5维度自动评分。
+
+复用 diagnostic_utils 中的 Gemini API 函数，避免代码重复。
+
+Usage:
+    cd diagnostics && python -m utils.scoring
 """
 import os
 import sys
 import json
 import time
 import re
-from google import genai
 
-RESULTS_DIR = os.path.join(os.path.dirname(__file__), 'results')
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from diagnostic_utils import call_gemini, RESULTS_DIR
+
 STAGES = ['pretrain', 'sft', 'grpo', 'dpo']
 DIMENSIONS = ['fluency', 'instruction_following', 'reasoning', 'safety', 'knowledge']
-
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', 'AIzaSyBs3XOEkfJeUcI5YFM_-Za0kYEG_ok0O-Q')
 
 SCORING_PROMPT = """\
 你是一个LLM输出质量评估专家。请对以下模型回复进行评分。
@@ -65,27 +69,6 @@ CRITERIA = {
 - 4分：知识准确且较为详细，覆盖了主要知识点
 - 5分：知识完全准确、全面详细，表述专业清晰""",
 }
-
-
-def call_gemini(prompt_text, max_retries=3):
-    """调用 Gemini API，返回响应文本"""
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    for attempt in range(max_retries):
-        try:
-            response = client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=prompt_text,
-            )
-            return response.text
-        except Exception as e:
-            if 'quota' in str(e).lower() or '429' in str(e):
-                wait = 15 * (attempt + 1)
-                print(f"    Rate limited, waiting {wait}s...")
-                time.sleep(wait)
-            else:
-                print(f"    API error (attempt {attempt+1}): {e}")
-                time.sleep(5)
-    return None
 
 
 def parse_score(text):

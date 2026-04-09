@@ -1,6 +1,11 @@
 """
-Module 1: Output Behavior Diagnosis — 评分 + 可视化
+Rule-based Scoring + Visualization Utility — 独立评分可视化脚本
 基于规则的自动评分（无需外部API），生成雷达图和趋势折线图。
+
+复用 diagnostic_utils 中的路径常量，避免代码重复。
+
+Usage:
+    cd diagnostics && python -m utils.visualization
 """
 import os
 import sys
@@ -10,14 +15,12 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from matplotlib import font_manager
 plt.rcParams['font.sans-serif'] = ['Noto Sans CJK JP', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from diagnostic_utils import RESULTS_DIR, FIGURES_DIR, save_figure
 
-RESULTS_DIR = os.path.join(os.path.dirname(__file__), 'results')
-FIGURES_DIR = os.path.join(os.path.dirname(__file__), 'figures')
 STAGES = ['pretrain', 'sft', 'grpo', 'dpo']
 DIMENSIONS = ['fluency', 'instruction_following', 'reasoning', 'safety', 'knowledge']
 DIM_LABELS = ['Fluency', 'Instruction\nFollowing', 'Reasoning', 'Safety', 'Knowledge']
@@ -237,10 +240,7 @@ def plot_radar(avg_scores, llm_scores=None):
         ax.set_title(title, fontsize=13, pad=20)
 
     plt.tight_layout()
-    path = os.path.join(FIGURES_DIR, 'radar_behavior.png')
-    plt.savefig(path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"Saved radar chart: {path}")
+    save_figure(fig, 'radar_behavior.png')
 
 
 def plot_trend(avg_scores, llm_scores=None):
@@ -271,10 +271,7 @@ def plot_trend(avg_scores, llm_scores=None):
         ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    path = os.path.join(FIGURES_DIR, 'trend_behavior.png')
-    plt.savefig(path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"Saved trend chart: {path}")
+    save_figure(fig, 'trend_behavior.png')
 
 
 def main():
