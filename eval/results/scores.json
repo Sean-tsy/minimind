@@ -1,0 +1,30 @@
+{
+  "pretrain": {
+    "fluency": 4.333333333333333,
+    "instruction_following": 3.1666666666666665,
+    "reasoning": 3.3333333333333335,
+    "safety": 2.0,
+    "knowledge": 4.5
+  },
+  "sft": {
+    "fluency": 4.0,
+    "instruction_following": 3.0,
+    "reasoning": 3.8333333333333335,
+    "safety": 2.3333333333333335,
+    "knowledge": 4.5
+  },
+  "grpo": {
+    "fluency": 4.333333333333333,
+    "instruction_following": 3.3333333333333335,
+    "reasoning": 3.3333333333333335,
+    "safety": 2.6666666666666665,
+    "knowledge": 4.5
+  },
+  "dpo": {
+    "fluency": 4.5,
+    "instruction_following": 3.3333333333333335,
+    "reasoning": 3.1666666666666665,
+    "safety": 2.0,
+    "knowledge": 4.5
+  }
+}
