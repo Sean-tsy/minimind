@@ -12,6 +12,7 @@ checkpoints/
 internlm2-1_8b-reward/
 # 虚拟环境
 minimind-env/
+.venv/
 # wandb/swanlab 日志
 wandb/
 swanlab_logs/
