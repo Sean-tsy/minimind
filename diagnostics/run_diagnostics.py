@@ -40,9 +40,17 @@ def run_all(modules=None):
         all_results['module4'] = run_module4()
 
     elapsed = time.time() - start_time
+
+    # Detect judge backend
+    gemini_available = bool(os.environ.get('GEMINI_API_KEY'))
+    judge_backend = 'gemini' if gemini_available else 'offline_rules'
+    confidence = 'high' if gemini_available else 'medium'
+
     all_results['_meta'] = {
         'elapsed_seconds': round(elapsed, 1),
         'modules_run': modules,
+        'judge_backend': judge_backend,
+        'confidence': confidence,
     }
 
     save_json(all_results, 'diagnostic_report.json')
@@ -56,7 +64,10 @@ def print_final_report(results):
     print_header("FINAL DIAGNOSTIC REPORT")
 
     elapsed = results.get('_meta', {}).get('elapsed_seconds', 0)
-    print(f"\n  Total time: {elapsed:.0f}s ({elapsed/60:.1f}min)\n")
+    print(f"\n  Total time: {elapsed:.0f}s ({elapsed/60:.1f}min)")
+    judge = results.get('_meta', {}).get('judge_backend', 'unknown')
+    conf = results.get('_meta', {}).get('confidence', 'unknown')
+    print(f"  Judge backend: {judge}  |  Confidence: {conf}\n")
 
     # ---- Module 1 Summary ----
     m1 = results.get('module1', {})
@@ -154,6 +165,11 @@ def extract_key_findings(results):
             hr = m1[key].get('harmful_refusal_rate', 0)
             findings.append(f"{stage.upper()} harmful refusal rate: {hr:.0%}")
 
+    # [v6 NEW] Alignment tax
+    atax = m1.get('alignment_tax', {})
+    if atax:
+        findings.append(f"Alignment tax (GRPO→DPO): {atax.get('avg_tax', 0):+.2f} [{atax.get('status', '')}]")
+
     # Module 2 - forgetting
     m2 = results.get('module2', {})
     forgetting = m2.get('forgetting_rates', {})
@@ -162,11 +178,22 @@ def extract_key_findings(results):
             if rate > 0.15:
                 findings.append(f"⚠️ {cap} forgetting {trans}: {rate:+.1%}")
 
+    # [v6 NEW] VLM-CL failure modes
+    failure_modes = m2.get('vlm_cl_failure_modes', [])
+    for fm in failure_modes:
+        if fm.get('severity') not in ('PASS', None):
+            findings.append(f"⚠️ VLM-CL: {fm['mode']} — {fm.get('signal', '')}")
+
     # Module 3 - pathologies
     m3 = results.get('module3', {})
     for key, val in m3.items():
         if isinstance(val, dict) and val.get('status') in ('WARN', 'FAIL'):
             findings.append(f"⚠️ Pathology detected: {val.get('pathology','')} @ {val.get('stage','')}")
+
+    # [v6 NEW] Hallucination attribution
+    hall_attr = m3.get('hallucination_attribution', {})
+    if hall_attr:
+        findings.append(f"Hallucination source: {hall_attr.get('primary_source', 'unknown')}")
 
     # Module 4 - drift patterns
     m4 = results.get('module4', {})
@@ -175,7 +202,12 @@ def extract_key_findings(results):
         if summary.get('drift_pattern') == 'shallow_dominant':
             findings.append(f"⚠️ {pair}: shallow-dominant drift (may affect basic language)")
 
-    return findings[:8]  # 最多显示8条
+    # [v6 NEW] Causal inference
+    causal = m4.get('causal_inference', {})
+    if causal and causal.get('severity') == 'WARNING':
+        findings.append(f"⚠️ Causal: {causal['diagnosis']}")
+
+    return findings[:10]  # 最多显示10条
 
 
 def generate_markdown_report(results):
@@ -183,10 +215,14 @@ def generate_markdown_report(results):
     lines = []
     lines.append('# MiniMind Training Diagnostic Report\n')
     lines.append(f'Generated at: {time.strftime("%Y-%m-%d %H:%M:%S")}\n')
+    lines.append(f'*Framework Version: v6 (Literature-Enhanced)*\n')
 
     elapsed = results.get('_meta', {}).get('elapsed_seconds', 0)
     modules_run = results.get('_meta', {}).get('modules_run', [])
+    judge_backend = results.get('_meta', {}).get('judge_backend', 'unknown')
+    confidence = results.get('_meta', {}).get('confidence', 'unknown')
     lines.append(f'Modules run: {modules_run}  |  Total time: {elapsed:.0f}s\n')
+    lines.append(f'Judge backend: **{judge_backend}**  |  Confidence: **{confidence}**\n')
     lines.append('---\n')
 
     # ---- Module 1 ----
@@ -202,6 +238,18 @@ def generate_markdown_report(results):
                 score_key = next((k for k in ['avg_score', 'rate', 'harmful_refusal_rate'] if k in val), None)
                 score = val.get(score_key, '') if score_key else ''
                 lines.append(f'| {stage} | {metric} | {score} | {val["status"]} |')
+        # [v6 NEW] Alignment tax
+        atax = m1.get('alignment_tax', {})
+        if atax:
+            lines.append('')
+            lines.append('### Alignment Tax (GRPO → DPO)\n')
+            lines.append(f'Average alignment tax: **{atax.get("avg_tax", 0):+.2f}** [{atax.get("status", "")}]\n')
+            per_dim = atax.get('per_dimension', {})
+            if per_dim:
+                lines.append('| Dimension | Before DPO | After DPO | Tax |')
+                lines.append('|-----------|-----------|----------|-----|')
+                for dim, info in per_dim.items():
+                    lines.append(f'| {dim} | {info["before_dpo"]} | {info["after_dpo"]} | {info["tax"]:+.2f} |')
         lines.append('')
 
     # ---- Module 2 ----
@@ -226,6 +274,28 @@ def generate_markdown_report(results):
             for s in severe:
                 lines.append(f'- ⚠️ {s}')
             lines.append('')
+        # v6: Aggregate normalized forgetting
+        agg = m2.get('aggregate_forgetting', {})
+        if agg:
+            lines.append('**Aggregate Normalized Forgetting (Luo et al.):**\n')
+            lines.append('| Transition | NF (%) | |E| |')
+            lines.append('|------------|--------|-----|')
+            for trans, info in agg.items():
+                pct = info['normalized_forgetting_pct']
+                n = info['n_dimensions']
+                flag = '⚠️' if pct > 15 else ''
+                lines.append(f'| {trans} | {pct:+.1f}% | {n} | {flag}')
+            lines.append('')
+        # [v6 NEW] VLM-CL failure modes
+        fm_list = m2.get('vlm_cl_failure_modes', [])
+        if fm_list:
+            lines.append('### VLM-CL Failure Mode Mapping\n')
+            lines.append('| Mode | Severity | Signal | Recommendation |')
+            lines.append('|------|----------|--------|----------------|')
+            for fm in fm_list:
+                lines.append(f'| {fm.get("mode","")} | {fm.get("severity","")} | '
+                             f'{fm.get("signal","")} | {fm.get("recommendation","")} |')
+            lines.append('')
 
     # ---- Module 3 ----
     m3 = results.get('module3', {})
@@ -238,6 +308,17 @@ def generate_markdown_report(results):
                 cat = 'VLM' if val['pathology'] in ('modality_shortcut', 'description_collapse',
                                                      'visual_hallucination', 'grounding_failure') else 'LLM'
                 lines.append(f'| {cat} | {val["pathology"]} | {val.get("stage", "")} | {val["status"]} |')
+        # [v6 NEW] Hallucination source attribution
+        hall_attr = m3.get('hallucination_attribution', {})
+        if hall_attr:
+            lines.append('')
+            lines.append(f'**Hallucination Source**: {hall_attr.get("primary_source", "unknown")}')
+            lines.append(f'  - Evidence: {hall_attr.get("evidence", "")}')
+            lines.append(f'  - Recommendation: {hall_attr.get("recommendation", "")}')
+        # [v6 NEW] Spatial specificity
+        grounding = m3.get('grounding_failure', {})
+        if grounding and 'avg_spatial_specificity' in grounding:
+            lines.append(f'  - Spatial Specificity: {grounding["avg_spatial_specificity"]:.3f}')
         lines.append('')
 
     # ---- Module 4 ----
@@ -252,6 +333,15 @@ def generate_markdown_report(results):
                 lines.append(f'| {pair} | {summary.get("drift_pattern", "")} '
                              f'| {summary.get("shallow_avg", 0):.4f} '
                              f'| {summary.get("deep_avg", 0):.4f} |')
+        # [v6 NEW] Causal inference
+        causal = m4.get('causal_inference', {})
+        if causal:
+            lines.append('')
+            lines.append('### Causal Inference (M2 + M4)\n')
+            lines.append(f'- **Diagnosis**: {causal.get("diagnosis", "")}')
+            lines.append(f'- **Mechanism**: {causal.get("mechanism", "")}')
+            lines.append(f'- **Recommendation**: {causal.get("recommendation", "")}')
+            lines.append(f'- **Severity**: {causal.get("severity", "")}')
         lines.append('')
 
     # ---- Key Findings ----
@@ -269,7 +359,6 @@ def generate_markdown_report(results):
     with open(report_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(lines))
     print(f"  Markdown report saved to: {report_path}")
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='MiniMind Training Diagnostic')

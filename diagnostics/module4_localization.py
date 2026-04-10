@@ -29,12 +29,11 @@ import matplotlib.pyplot as plt
 sys.path.insert(0, os.path.dirname(__file__))
 from diagnostic_utils import (
     load_model, load_tokenizer, save_json, print_header, print_table, save_figure,
+    load_test_images,
     STAGES, VLM_STAGES, CHECKPOINT_DIR, FIGURES_DIR, DEVICE,
     vlm_checkpoints_available, load_vlm_model,
     LLM_STAGE_ORDER,
 )
-
-STAGE_ORDER = ['pretrain', 'sft', 'grpo', 'dpo']
 STAGE_PAIRS = [('pretrain', 'sft'), ('sft', 'grpo'), ('grpo', 'dpo'), ('sft', 'dpo')]
 
 REPR_PROMPTS = [
@@ -137,6 +136,9 @@ def parameter_drift_summary(drift_by_module):
     layer_drifts = {}
     layer_cosines = {}
     category_drifts = {'embedding': [], 'attn': [], 'ffn': [], 'norm': [], 'output_head': []}
+    # v6: per-layer per-category for Attn×FFN × Shallow×Deep grouping
+    attn_per_layer = {}
+    ffn_per_layer = {}
 
     for module, metrics in drift_by_module.items():
         drift = metrics['relative_drift']
@@ -153,8 +155,10 @@ def parameter_drift_summary(drift_by_module):
 
             if 'attn' in module and 'norm' not in module:
                 category_drifts['attn'].append(drift)
+                attn_per_layer.setdefault(layer_num, []).append(drift)
             elif 'ffn' in module and 'norm' not in module:
                 category_drifts['ffn'].append(drift)
+                ffn_per_layer.setdefault(layer_num, []).append(drift)
             elif 'norm' in module:
                 category_drifts['norm'].append(drift)
         elif module == 'embedding':
@@ -165,6 +169,8 @@ def parameter_drift_summary(drift_by_module):
     per_layer = {k: round(float(np.mean(v)), 4) for k, v in sorted(layer_drifts.items())}
     per_layer_cosine = {k: round(float(np.mean(v)), 4) for k, v in sorted(layer_cosines.items())}
     per_category = {k: round(float(np.mean(v)), 4) for k, v in category_drifts.items() if v}
+    attn_by_layer = {k: round(float(np.mean(v)), 4) for k, v in sorted(attn_per_layer.items())}
+    ffn_by_layer = {k: round(float(np.mean(v)), 4) for k, v in sorted(ffn_per_layer.items())}
 
     # 浅层 vs 深层
     n_layers = max(layer_drifts.keys()) + 1 if layer_drifts else 8
@@ -184,6 +190,8 @@ def parameter_drift_summary(drift_by_module):
         'per_layer': per_layer,
         'per_layer_cosine': per_layer_cosine,
         'per_category': per_category,
+        'attn_per_layer': attn_by_layer,
+        'ffn_per_layer': ffn_by_layer,
         'shallow_avg': round(shallow_avg, 4),
         'deep_avg': round(deep_avg, 4),
         'drift_pattern': pattern,
@@ -256,73 +264,123 @@ def layer_representation_similarity(stage_a, stage_b, tokenizer):
 # 可视化
 # ══════════════════════════════════════════════════════════
 
-def plot_parameter_drift(all_drift_results):
-    """Fig 13 variant: 参数漂移柱状图（per-category view）"""
-    fig, axes = plt.subplots(1, len(all_drift_results), figsize=(5 * len(all_drift_results), 6))
-    if len(all_drift_results) == 1:
-        axes = [axes]
-
-    for ax, (pair_name, summary) in zip(axes, all_drift_results.items()):
-        per_cat = summary['per_category']
-        cats = list(per_cat.keys())
-        vals = list(per_cat.values())
-        bars = ax.barh(cats, vals, color=['#4e79a7', '#f28e2b', '#e15759', '#76b7b2', '#59a14f'][:len(cats)])
-        ax.set_xlabel('Relative Drift')
-        ax.set_title(pair_name)
-        for bar, v in zip(bars, vals):
-            ax.text(bar.get_width() + 0.002, bar.get_y() + bar.get_height()/2,
-                    f'{v:.3f}', va='center', fontsize=9)
-
-    plt.tight_layout()
-    save_figure(fig, 'fig13_parameter_drift_category.png')
-
-
 def plot_representation_similarity(all_sim_results):
-    """Fig 14: 逐层表征相似度"""
+    """Fig 14: 逐层表征相似度 [v6 ENHANCED: 标注 Laitinen 预期范围]"""
     fig, ax = plt.subplots(figsize=(10, 5))
 
-    for pair_name, sims in all_sim_results.items():
+    markers = ['o', 's', 'D', '^', 'v', 'P', 'X']
+    linestyles = ['-', '--', '-.', ':', '-', '--', '-.']
+    cmap = plt.cm.tab10
+
+    for i, (pair_name, sims) in enumerate(all_sim_results.items()):
         layers = list(range(len(sims)))
-        ax.plot(layers, sims, marker='o', label=pair_name, linewidth=2)
+        ax.plot(layers, sims, marker=markers[i % len(markers)],
+                linestyle=linestyles[i % len(linestyles)],
+                label=pair_name, linewidth=2, markersize=7,
+                color=cmap(i))
 
     ax.set_xlabel('Layer')
     ax.set_ylabel('Cosine Similarity')
     ax.set_title('Fig 14. Representation Similarity Across Layers', fontsize=14, fontweight='bold')
     ax.legend()
-    ax.set_ylim(0, 1.05)
+    # Dynamic y-axis: min(all sims) - 0.02 to 1.01
+    all_vals = [s for sims in all_sim_results.values() for s in sims]
+    y_min = min(all_vals) - 0.02 if all_vals else 0
+    ax.set_ylim(max(y_min, 0), 1.01)
     ax.grid(True, alpha=0.3)
 
+    # [v6] Laitinen et al. literature reference (CKA metric, not directly comparable to cosine sim)
+    if all_vals:
+        n_layers = max(len(sims) for sims in all_sim_results.values())
+        mid_x = n_layers // 2
+        ax.annotate(
+            'Ref: Laitinen et al.\nCKA drop 0.32–0.47\n(intermediate layers,\ndifferent metric)',
+            xy=(mid_x, y_min + 0.01), fontsize=7.5, color='gray', alpha=0.7,
+            ha='center', va='bottom', style='italic',
+            bbox=dict(boxstyle='round,pad=0.3', fc='#f0f0f0', ec='gray', alpha=0.5))
+
+    ax.legend(fontsize=9)
     save_figure(fig, 'fig14_representation_similarity.png')
 
 
 def plot_layer_drift_heatmap(all_drift_results):
-    """Fig 13: 层级漂移热力图"""
+    """Fig 13: 层级漂移热力图 [v6 ENHANCED: 双重分组 — 功能(Attn/FFN) × 深度(Shallow/Deep)]"""
     pair_names = list(all_drift_results.keys())
     n_layers = max(
         len(s['per_layer']) for s in all_drift_results.values()
     )
 
+    # --- 主热力图: per-layer drift ---
     data = np.zeros((len(pair_names), n_layers))
     for i, (name, summary) in enumerate(all_drift_results.items()):
         for layer, drift in summary['per_layer'].items():
             data[i, layer] = drift
 
-    fig, ax = plt.subplots(figsize=(12, 3 + len(pair_names)))
+    fig, axes = plt.subplots(2, 1, figsize=(12, 4 + len(pair_names) * 2),
+                             gridspec_kw={'height_ratios': [3, 2]})
+
+    # Top: per-layer heatmap
+    ax = axes[0]
     im = ax.imshow(data, aspect='auto', cmap='YlOrRd')
     ax.set_xticks(range(n_layers))
     ax.set_xticklabels([f'L{i}' for i in range(n_layers)])
     ax.set_yticks(range(len(pair_names)))
     ax.set_yticklabels(pair_names)
     ax.set_xlabel('Layer')
-    ax.set_title('Fig 13. Parameter Drift Heatmap', fontsize=14, fontweight='bold')
-    plt.colorbar(im, label='Relative Drift')
+    ax.set_title('Fig 13. Parameter Drift Heatmap (Per Layer)', fontsize=12, fontweight='bold')
+    plt.colorbar(im, ax=ax, label='Relative Drift', shrink=0.8)
 
-    # 标注数值
     for i in range(len(pair_names)):
         for j in range(n_layers):
             if data[i, j] > 0:
                 ax.text(j, i, f'{data[i,j]:.3f}', ha='center', va='center', fontsize=7)
 
+    # [v6 NEW] Bottom: Attn vs FFN × Shallow vs Deep grouped bar
+    ax2 = axes[1]
+    func_groups = ['attn', 'ffn']
+    depth_groups = ['Shallow', 'Deep']
+    x = np.arange(len(pair_names))
+    bar_width = 0.18
+    offsets = [-1.5, -0.5, 0.5, 1.5]
+    colors_map = {
+        ('attn', 'Shallow'): '#4e79a7', ('attn', 'Deep'): '#a0cbe8',
+        ('ffn', 'Shallow'): '#f28e2b', ('ffn', 'Deep'): '#ffbe7d',
+    }
+
+    for idx, (func, depth) in enumerate([(f, d) for f in func_groups for d in depth_groups]):
+        vals = []
+        for pair_name, summary in all_drift_results.items():
+            half = n_layers // 2
+            # Use actual per-category per-layer data
+            if func == 'attn':
+                layer_data = summary.get('attn_per_layer', {})
+            else:
+                layer_data = summary.get('ffn_per_layer', {})
+
+            if layer_data:
+                if depth == 'Shallow':
+                    sel = [v for k, v in layer_data.items() if k < half]
+                else:
+                    sel = [v for k, v in layer_data.items() if k >= half]
+                vals.append(np.mean(sel) if sel else 0)
+            else:
+                # Fallback: use per_category overall (no depth split available)
+                per_cat = summary.get('per_category', {})
+                vals.append(per_cat.get(func, 0))
+
+        label = f'{func.upper()} ({depth})'
+        ax2.bar(x + offsets[idx] * bar_width, vals, bar_width,
+                label=label, color=colors_map.get((func, depth), '#999'))
+
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(pair_names, fontsize=9)
+    ax2.set_ylabel('Avg Drift')
+    ax2.set_title('Attn vs FFN × Shallow vs Deep', fontsize=11, fontweight='bold')
+    ax2.legend(fontsize=8, ncol=4, loc='upper right')
+    ax2.grid(axis='y', alpha=0.3)
+
+    fig.suptitle('Fig 13. Parameter Drift Analysis', fontsize=14, fontweight='bold', y=1.01)
+    fig.tight_layout()
     save_figure(fig, 'fig13_parameter_drift_heatmap.png')
 
 
@@ -335,7 +393,7 @@ def compute_cross_modal_alignment(model, tokenizer, test_images):
     """配对余弦相似度 + 跨模态检索准确率"""
     from PIL import Image
 
-    text_prompts = [img.get('description', '一张图片') for img in test_images[:10]]
+    text_prompts = [img.get('description') or '一张图片' for img in test_images[:10]]
     image_embeds = []
     text_embeds = []
 
@@ -398,7 +456,7 @@ def measure_projection_effectiveness(model, tokenizer, test_images):
     post_proj_sims = []
 
     for img_info in test_images[:5]:
-        text = img_info.get('description', '一张图片')
+        text = img_info.get('description') or '一张图片'
         input_ids = tokenizer(text, return_tensors='pt').input_ids.to(model.device)
         outputs = model.model(input_ids)
         text_embed = outputs[0].mean(dim=1).cpu()
@@ -430,7 +488,7 @@ def measure_projection_effectiveness(model, tokenizer, test_images):
         'pre_projection_sim': round(float(np.mean(pre_proj_sims)), 4),
         'post_projection_sim': round(float(np.mean(post_proj_sims)), 4),
         'improvement': round(float(improvement), 4),
-        'effective': improvement > 0.05,
+        'effective': bool(improvement > 0.05),
     }
 
 
@@ -444,9 +502,12 @@ def trace_visual_info_flow(model, tokenizer, test_images):
     n_layers = len(model.model.layers)
     layer_interactions = [[] for _ in range(n_layers)]
     image_marker = model.config.image_ids[0] if hasattr(model.config, 'image_ids') else 12
+    image_token_len = getattr(model.config, 'image_token_len', 64)
+    image_special_token = getattr(model.config, 'image_special_token', '<|image_pad|>')
+    image_placeholder = image_special_token * image_token_len
 
     for img_info in test_images[:3]:
-        prompt = '请描述这张图片。'
+        prompt = f'{image_placeholder}请描述这张图片。'
         input_text = tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt}],
             tokenize=False, add_generation_prompt=True
@@ -560,12 +621,94 @@ def compute_backbone_drift():
 
 
 # ══════════════════════════════════════════════════════════
-# 可视化: Fig 15 – Cross-Modal Alignment t-SNE
+# [v6 NEW] 4.6.1 因果推断逻辑
+# ══════════════════════════════════════════════════════════
+
+def causal_inference_backbone(backbone_result, forgetting_data=None):
+    """[v6 ENHANCED] 结合 M2 遗忘结果与 M4 backbone drift 做因果推断。
+
+    判定逻辑 (来源: VLM-CL综述 + Laitinen + Yao et al.):
+    - 遗忘严重 + 浅层漂移大 → 共享模块干扰 (VLM-CL 失败模式 2)
+    - 遗忘不严重 + 漂移集中在深层 → 正常多模态适配
+    - 遗忘严重 + 漂移均匀 → 全局性干扰
+    """
+    if not backbone_result:
+        return None
+
+    pattern = backbone_result.get('drift_pattern', 'uniform')
+    shallow = backbone_result.get('shallow_avg_drift', 0)
+    deep = backbone_result.get('deep_avg_drift', 0)
+
+    # 加载 M2 遗忘数据
+    if forgetting_data is None:
+        from diagnostic_utils import load_json
+        m2 = load_json('retention_matrix.json') or {}
+        cross_modal = m2.get('cross_modal_forgetting', {})
+        quality_drop = cross_modal.get('quality_drop', 0)
+    else:
+        quality_drop = forgetting_data.get('quality_drop', 0)
+
+    forgetting_severe = quality_drop >= 0.5
+
+    if forgetting_severe and pattern == 'shallow_dominant':
+        diagnosis = '共享模块干扰（VLM-CL 失败模式 2）'
+        mechanism = '低层 attention heads 扰动（Laitinen & Imanov, 2026）'
+        recommendation = '冻结浅层 / 使用 O-LoRA（VLM-CL 综述）'
+        severity = 'WARNING'
+    elif forgetting_severe and pattern == 'deep_dominant':
+        diagnosis = '深层表征重组超出正常范围'
+        mechanism = '概念电路重组（Yao et al., 2025）但过度干扰'
+        recommendation = '降低学习率 / 增加文本混合数据'
+        severity = 'WARNING'
+    elif not forgetting_severe and pattern == 'deep_dominant':
+        diagnosis = '正常的多模态适配'
+        mechanism = '深层适应新模态（预期行为）'
+        recommendation = '无需干预'
+        severity = 'PASS'
+    elif forgetting_severe and pattern == 'uniform':
+        diagnosis = '全局性干扰'
+        mechanism = '学习率过高或数据分布偏移过大'
+        recommendation = '降低学习率 / 增加文本混合数据 / OGPSA梯度正交投影'
+        severity = 'WARNING'
+    else:
+        diagnosis = '轻微参数漂移，在可接受范围内'
+        mechanism = '正常训练过程中的参数更新'
+        recommendation = '无需干预，可继续训练'
+        severity = 'PASS'
+
+    return {
+        'diagnosis': diagnosis,
+        'mechanism': mechanism,
+        'recommendation': recommendation,
+        'severity': severity,
+        'forgetting_severe': forgetting_severe,
+        'quality_drop': round(quality_drop, 2),
+        'drift_pattern': pattern,
+        'shallow_drift': round(shallow, 4),
+        'deep_drift': round(deep, 4),
+    }
+
+
+# ══════════════════════════════════════════════════════════
+# 可视化: Fig 15 – Cross-Modal Alignment (Dimensionality Reduction)
 # ══════════════════════════════════════════════════════════
 
 def plot_cross_modal_tsne(alignment_before, alignment_after):
-    """Fig 15: 散点图 — image vs text embeddings in 2D (before/after dual subplot)"""
+    """Fig 15: 散点图 — image vs text embeddings in 2D (t-SNE preferred, PCA fallback for small N)"""
+    from sklearn.manifold import TSNE
     from sklearn.decomposition import PCA
+
+    def _reduce_2d(all_embeds):
+        """Use t-SNE when enough samples, PCA fallback for small N."""
+        n_samples = all_embeds.shape[0]
+        if n_samples >= 6:
+            perplexity = min(30, max(2, n_samples // 2 - 1))
+            tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42,
+                        n_iter=1000, init='pca', learning_rate='auto')
+            return tsne.fit_transform(all_embeds), 't-SNE'
+        else:
+            pca = PCA(n_components=2)
+            return pca.fit_transform(all_embeds), 'PCA'
 
     def _plot_panel(ax, alignment, title):
         if not alignment:
@@ -579,13 +722,11 @@ def plot_cross_modal_tsne(alignment_before, alignment_after):
             ax.set_title(title)
             return
 
-        all_embeds = torch.cat([img_embeds, txt_embeds], dim=0).numpy()
+        all_embeds = torch.cat([img_embeds, txt_embeds], dim=0).float().numpy()
         n_img = img_embeds.shape[0]
         n_samples = all_embeds.shape[0]
 
-        # Use PCA (t-SNE needs n_samples > perplexity, PCA is stable for small N)
-        pca = PCA(n_components=2)
-        coords = pca.fit_transform(all_embeds)
+        coords, method = _reduce_2d(all_embeds)
 
         img_coords = coords[:n_img]
         txt_coords = coords[n_img:]
@@ -604,11 +745,13 @@ def plot_cross_modal_tsne(alignment_before, alignment_after):
         ax.set_title(f'{title}\n(avg cos sim: {sim:.4f})', fontsize=11, fontweight='bold')
         ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3)
+        return method
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-    _plot_panel(axes[0], alignment_before, 'VLM-Pretrain')
-    _plot_panel(axes[1], alignment_after, 'VLM-SFT')
-    fig.suptitle('Fig 15. Cross-Modal Alignment (PCA)', fontsize=14, fontweight='bold')
+    method_a = _plot_panel(axes[0], alignment_before, 'VLM-Pretrain')
+    method_b = _plot_panel(axes[1], alignment_after, 'VLM-SFT')
+    method = method_a or method_b or 't-SNE'
+    fig.suptitle(f'Fig 15. Cross-Modal Alignment ({method})', fontsize=14, fontweight='bold')
     fig.tight_layout(rect=[0, 0, 1, 0.93])
     save_figure(fig, 'fig15_cross_modal_alignment.png')
 
@@ -627,16 +770,38 @@ def plot_visual_info_flow(flow_result):
 
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.plot(layers, interactions, marker='o', linewidth=2, color='#4e79a7', markersize=8)
+    # Per-layer value annotations
+    for i, val in enumerate(interactions):
+        ax.annotate(f'{val:.3f}', (i, val), textcoords='offset points',
+                    xytext=(0, 8), ha='center', fontsize=7.5, color='#333')
     ax.set_xlabel('Layer')
     ax.set_ylabel('Image-Text Interaction Strength')
     ax.set_title('Fig 16. Visual Information Flow', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3)
-    ax.set_ylim(0, 1.05)
+    # Dynamic y-axis based on data range
+    y_max = max(interactions) if interactions else 1.0
+    y_min = min(interactions) if interactions else 0
+    margin = max((y_max - y_min) * 0.25, 0.02)
+    ax.set_ylim(max(y_min - margin, 0), y_max + margin)
 
     trend = flow_result.get('trend', '')
-    ax.annotate(f'Trend: {trend}', xy=(0.02, 0.95), xycoords='axes fraction',
-                fontsize=12, fontweight='bold',
-                color='green' if trend == 'increasing' else 'orange')
+    # Annotate min/max layers
+    max_layer = int(np.argmax(interactions))
+    min_layer = int(np.argmin(interactions))
+    ax.annotate(f'Peak: L{max_layer}', (max_layer, interactions[max_layer]),
+                textcoords='offset points', xytext=(15, -5), fontsize=9,
+                fontweight='bold', color='#e15759',
+                arrowprops=dict(arrowstyle='->', color='#e15759', lw=1.2))
+    ax.annotate(f'Min: L{min_layer}', (min_layer, interactions[min_layer]),
+                textcoords='offset points', xytext=(15, 5), fontsize=9,
+                fontweight='bold', color='#4e79a7',
+                arrowprops=dict(arrowstyle='->', color='#4e79a7', lw=1.2))
+
+    ax.annotate(f'Trend: {trend}\nRange: {y_min:.4f} – {y_max:.4f}',
+                xy=(0.02, 0.95), xycoords='axes fraction',
+                fontsize=10, fontweight='bold', va='top',
+                color='green' if trend == 'increasing' else 'orange',
+                bbox=dict(boxstyle='round,pad=0.3', fc='lightyellow', alpha=0.8))
 
     save_figure(fig, 'fig16_visual_info_flow.png')
 
@@ -645,8 +810,9 @@ def plot_visual_info_flow(flow_result):
 # 可视化: Fig 17 – Backbone Drift: Shallow vs Deep
 # ══════════════════════════════════════════════════════════
 
-def plot_backbone_drift(backbone_result):
-    """Fig 17: 柱状图 — shallow vs deep layers drift from VLM training"""
+def plot_backbone_drift(backbone_result, causal_result=None):
+    """Fig 17: 柱状图 — shallow vs deep layers drift from VLM training
+    [v6 ENHANCED] 标注 VLM-CL 失败模式归因"""
     if not backbone_result:
         return
 
@@ -664,6 +830,17 @@ def plot_backbone_drift(backbone_result):
     ax.set_title(f'Fig 17. Backbone Drift (Pattern: {pattern})', fontsize=14, fontweight='bold')
     ax.set_ylabel('Average Relative Drift')
     ax.grid(axis='y', alpha=0.3)
+
+    # [v6 NEW] 因果推断标注
+    if causal_result:
+        diag = causal_result.get('diagnosis', '')
+        sev = causal_result.get('severity', '')
+        color = '#e15759' if sev == 'WARNING' else '#59a14f'
+        ax.annotate(f'诊断: {diag}\n建议: {causal_result.get("recommendation", "")}',
+                    xy=(0.5, 0.02), xycoords='axes fraction',
+                    ha='center', va='bottom', fontsize=8,
+                    bbox=dict(boxstyle='round,pad=0.4', fc='lightyellow', ec=color, alpha=0.9))
+
     save_figure(fig, 'fig17_backbone_drift.png')
 
 
@@ -690,7 +867,6 @@ def run_module4():
               f"(shallow={summary['shallow_avg']:.4f}, deep={summary['deep_avg']:.4f})")
 
     results['parameter_drift'] = all_drift
-    plot_parameter_drift(all_drift)
     plot_layer_drift_heatmap(all_drift)
 
     # ---- 4.2 Representation Similarity ----
@@ -772,7 +948,19 @@ def run_module4():
             print(f"    Shallow: {backbone['shallow_avg_drift']}, "
                   f"Deep: {backbone['deep_avg_drift']}, "
                   f"Pattern: {backbone['drift_pattern']}")
-            plot_backbone_drift(backbone)
+
+            # [v6 NEW] 因果推断
+            print("\n[4.6.1] Causal Inference (combining M2 forgetting + M4 drift)...")
+            causal = causal_inference_backbone(backbone)
+            if causal:
+                results['causal_inference'] = causal
+                print(f"    Diagnosis: {causal['diagnosis']}")
+                print(f"    Severity: {causal['severity']}")
+                print(f"    Recommendation: {causal['recommendation']}")
+            else:
+                causal = None
+
+            plot_backbone_drift(backbone, causal)
     else:
         print("\n  [SKIP] VLM checkpoints not found, skipping VLM localization.")
 
@@ -810,22 +998,8 @@ def run_module4():
 
 
 def _load_test_images():
-    """加载VLM测试图片"""
-    from PIL import Image
-    images_dir = os.path.join(os.path.dirname(__file__), '..', 'images')
-    test_images = []
-    if os.path.isdir(images_dir):
-        for fname in sorted(os.listdir(images_dir)):
-            if fname.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
-                img_path = os.path.join(images_dir, fname)
-                try:
-                    img = Image.open(img_path).convert('RGB')
-                    test_images.append({'id': fname, 'image': img})
-                except Exception:
-                    continue
-                if len(test_images) >= 15:
-                    break
-    return test_images
+    """加载VLM测试图片（使用集中式加载器，含 ground truth 标注）"""
+    return load_test_images(max_images=15)
 
 
 if __name__ == '__main__':

@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from diagnostic_utils import (
     load_model, load_tokenizer, generate_response,
     save_json, print_header, print_table, save_figure, call_gemini, gemini_score,
+    load_test_images,
     STAGES, VLM_STAGES, LLM_STAGE_ORDER,
     vlm_checkpoints_available, load_vlm_model, generate_vlm_response,
 )
@@ -119,6 +120,94 @@ def _max_repeated_substring_ratio(text):
 # 3.2 Format Overfitting Detection
 # ══════════════════════════════════════════════════════════
 
+# 每组 prompt 对应的核心概念关键词（用于无 API 时的语义一致性判断）
+_SEMANTIC_KEYWORDS = {
+    '光合作用': ['光合', '植物', '叶绿', '二氧化碳', '氧气', '太阳', '水', '能量', '光能', '葡萄糖'],
+    '动物': ['动物', '鸟', '鱼', '猫', '狗', '马', '牛', '羊', '虎', '兔', '龙', '蛇', '鸡', '猴'],
+    '首都': ['北京', '首都', 'Beijing'],
+    '人工智能': ['人工智能', 'AI', '机器学习', '智能', '算法', '数据', '模型', '深度学习', '神经网络'],
+}
+
+
+def _rule_semantic_consistency(prompt_i, prompt_j, resp_i, resp_j):
+    """规则兜底：分解式语义一致性判断
+
+    返回 dict:
+      - topic_match (0-1): 核心概念关键词重叠度
+      - entity_match (0-1): 字符 bigram Jaccard 相似度
+      - structure_match (0-1): 回答类型 + 长度比一致性
+      - final_consistency (bool): 综合判定
+    """
+    empty_result = {'topic_match': 0.0, 'entity_match': 0.0,
+                    'structure_match': 0.0, 'final_consistency': False}
+    if not resp_i or not resp_j or len(resp_i) < 3 or len(resp_j) < 3:
+        return empty_result
+
+    ri, rj = resp_i.strip(), resp_j.strip()
+
+    # --- Sub-score 1: topic_match (核心概念关键词重叠) ---
+    topic_keywords = []
+    for topic, kws in _SEMANTIC_KEYWORDS.items():
+        if topic in prompt_i or topic in prompt_j:
+            topic_keywords = kws
+            break
+
+    topic_match = 0.0
+    if topic_keywords:
+        hits_i = sum(1 for kw in topic_keywords if kw in ri)
+        hits_j = sum(1 for kw in topic_keywords if kw in rj)
+        # Both have hit rate → overlap ratio
+        max_possible = len(topic_keywords)
+        if max_possible > 0:
+            rate_i = hits_i / max_possible
+            rate_j = hits_j / max_possible
+            # Harmonic mean of hit rates → rewards both having hits
+            if rate_i + rate_j > 0:
+                topic_match = 2 * rate_i * rate_j / (rate_i + rate_j)
+
+    # --- Sub-score 2: entity_match (字符 bigram Jaccard) ---
+    def _char_bigrams(text):
+        return set(text[i:i+2] for i in range(len(text) - 1))
+
+    bigrams_i = _char_bigrams(ri)
+    bigrams_j = _char_bigrams(rj)
+    entity_match = 0.0
+    if bigrams_i and bigrams_j:
+        overlap = len(bigrams_i & bigrams_j)
+        union = len(bigrams_i | bigrams_j)
+        entity_match = overlap / union if union > 0 else 0
+
+    # --- Sub-score 3: structure_match (类型 + 长度比一致性) ---
+    def _response_type(text):
+        if any(c in text for c in '123①②③') or text.count('、') >= 2:
+            return 'list'
+        if len(text) < 15:
+            return 'short'
+        return 'paragraph'
+
+    type_i, type_j = _response_type(ri), _response_type(rj)
+    len_ratio = max(len(ri), 1) / max(len(rj), 1)
+    type_match = 1.0 if type_i == type_j else 0.0
+    len_match = 1.0 if 0.3 < len_ratio < 3.0 else 0.5 if 0.1 < len_ratio < 10.0 else 0.0
+    structure_match = (type_match + len_match) / 2.0
+
+    # --- Final: weighted decision ---
+    # topic_match is most reliable when available, entity_match next, structure weakest
+    if topic_keywords:
+        weighted = 0.5 * topic_match + 0.3 * entity_match + 0.2 * structure_match
+    else:
+        weighted = 0.5 * entity_match + 0.5 * structure_match
+
+    final_consistency = weighted > 0.25
+
+    return {
+        'topic_match': round(topic_match, 3),
+        'entity_match': round(entity_match, 3),
+        'structure_match': round(structure_match, 3),
+        'final_consistency': final_consistency,
+    }
+
+
 FORMAT_PROMPT_GROUPS = [
     # 每组 3-4 种不同表达方式 — 同一语义
     [
@@ -159,6 +248,7 @@ def detect_format_overfitting(model, tokenizer, stage_name):
 
         # 两两比较语义一致性
         pair_consistencies = []
+        pair_subscores = []
         for i in range(len(responses)):
             for j in range(i + 1, len(responses)):
                 ri, rj = responses[i], responses[j]
@@ -177,19 +267,34 @@ def detect_format_overfitting(model, tokenizer, stage_name):
 
                 if judgment is not None:
                     is_consistent = '一致' in judgment and '不一致' not in judgment
+                    sub = {'topic_match': 1.0 if is_consistent else 0.0,
+                           'entity_match': 1.0 if is_consistent else 0.0,
+                           'structure_match': 1.0 if is_consistent else 0.0,
+                           'final_consistency': is_consistent}
                 else:
-                    # Gemini不可用时回退到字符相似度
-                    sim = SequenceMatcher(None, ri or '', rj or '').ratio()
-                    is_consistent = sim > 0.5 and both_valid
+                    # Gemini不可用时：分解式语义一致性判断
+                    sub = _rule_semantic_consistency(
+                        group[i], group[j], ri, rj)
+                    is_consistent = sub['final_consistency']
 
                 pair_consistencies.append(is_consistent)
+                pair_subscores.append(sub)
 
         group_consistent = sum(pair_consistencies) / max(len(pair_consistencies), 1)
+
+        # Aggregate sub-scores for this group
+        avg_sub = {}
+        if pair_subscores:
+            for key in ('topic_match', 'entity_match', 'structure_match'):
+                avg_sub[key] = round(
+                    sum(s.get(key, 0) for s in pair_subscores) / len(pair_subscores), 3)
+
         results.append({
             'prompts': group,
             'responses': [(r or '')[:150] for r in responses],
             'group_consistency': round(group_consistent, 3),
             'consistent': group_consistent > 0.5,
+            'subscores': avg_sub,
         })
 
     consistency_rate = sum(1 for r in results if r['consistent']) / len(results)
@@ -427,11 +532,93 @@ AI描述：{resp[:300]}
 
 
 # ══════════════════════════════════════════════════════════
+# [v6 NEW] 3.7.1 幻觉来源归因
+# ══════════════════════════════════════════════════════════
+
+def attribute_hallucination_source(model, tokenizer, test_images, shortcut_result=None):
+    """[v6 NEW] 检测到幻觉后，归因到 Jing et al. 三个组件来源。
+
+    归因流程：
+    1. LLM 语言先验主导？ → 遮蔽实验: visual_dependency < 0.2
+    2. 投影层信息损失？   → projection_sim_gain < 0.1
+    3. 视觉编码器不忠实？ → 两者都不满足
+
+    Returns:
+        dict with 'primary_source', 'evidence', 'recommendation'
+    """
+    # 收集 visual dependency — 复用 shortcut_result 或重新计算
+    if shortcut_result and 'avg_visual_dependency' in shortcut_result:
+        avg_visual_dep = shortcut_result['avg_visual_dependency']
+    else:
+        avg_visual_dep = 0.5  # default if not available
+
+    # 计算 projection sim gain
+    projection_sim_gain = _compute_projection_gain(model, tokenizer, test_images)
+
+    # 归因
+    if avg_visual_dep < 0.2:
+        source = 'LLM语言先验主导'
+        evidence = f'visual_dependency={avg_visual_dep:.3f} < 0.2'
+        recommendation = '增加视觉特征的attention权重 / 减少LLM预训练语言偏置'
+    elif projection_sim_gain < 0.1:
+        source = '投影层信息损失'
+        evidence = f'projection_sim_gain={projection_sim_gain:.4f} < 0.1'
+        recommendation = '增大投影层维度 / 使用多层MLP替代线性投影'
+    else:
+        source = '视觉编码器表示质量'
+        evidence = (f'visual_dependency={avg_visual_dep:.3f} ≥ 0.2, '
+                    f'projection_gain={projection_sim_gain:.4f} ≥ 0.1')
+        recommendation = '考虑更强的视觉编码器或微调视觉编码器参数'
+
+    return {
+        'primary_source': source,
+        'evidence': evidence,
+        'recommendation': recommendation,
+        'visual_dependency': round(avg_visual_dep, 3),
+        'projection_sim_gain': round(projection_sim_gain, 4),
+        'literature': 'Jing et al. (2505.01958): 多组件幻觉来源分析',
+    }
+
+
+def _compute_projection_gain(model, tokenizer, test_images):
+    """计算 projection 前后与文本嵌入的余弦相似度增益"""
+    gains = []
+    for img_info in test_images[:3]:
+        text = img_info.get('description') or '一张图片'
+        try:
+            input_ids = tokenizer(text, return_tensors='pt').input_ids.to(model.device)
+            with torch.no_grad():
+                outputs = model.model(input_ids)
+            text_embed = outputs[0].mean(dim=1).cpu()
+
+            if model.processor is not None and model.vision_encoder is not None:
+                img_inputs = model.image2tensor(img_info['image'], model.processor)
+                img_inputs = {k: v.to(model.device) for k, v in img_inputs.items()}
+                with torch.no_grad():
+                    vis_out = model.get_image_embeddings(img_inputs, model.vision_encoder)
+                pre_proj = vis_out.mean(dim=1).cpu()
+                with torch.no_grad():
+                    post_proj = model.vision_proj(vis_out).mean(dim=1).cpu()
+
+                min_dim = min(pre_proj.shape[-1], text_embed.shape[-1])
+                pre_sim = torch.nn.functional.cosine_similarity(
+                    pre_proj[..., :min_dim], text_embed[..., :min_dim]).item()
+                post_sim = torch.nn.functional.cosine_similarity(post_proj, text_embed).item()
+                gains.append(post_sim - pre_sim)
+        except Exception:
+            continue
+
+    return float(np.mean(gains)) if gains else 0.0
+
+
+# ══════════════════════════════════════════════════════════
 # 3.8 Grounding Failure Detection (VLM)
+# [v6 ENHANCED] 增加空间特异性检测
 # ══════════════════════════════════════════════════════════
 
 def detect_grounding_failure(model, tokenizer, test_images):
-    """检查模型回答是否与图片内容对应 — 正确答案 vs 干扰项对比"""
+    """检查模型回答是否与图片内容对应
+    [v6 ENHANCED] 增加空间特异性检测：描述是否包含具体位置/颜色/形状细节"""
     results = []
     for img_info in test_images[:5]:
         prompt = '这张图片中最显眼的物体是什么？请具体描述。'
@@ -461,21 +648,65 @@ AI回答：{resp[:200]}
             dist_overlap = len(dist_words & set(resp_lower))
             is_grounded = gt_overlap >= dist_overlap if gt_desc else len(resp or '') > 10
 
+        # [v6 NEW] 空间特异性检测
+        spatial_specificity = _assess_spatial_specificity(resp or '')
+
         results.append({
             'image_id': img_info.get('id', ''),
             'response': resp[:150],
             'ground_truth': gt_desc[:100],
             'distractor': distractor[:100],
             'is_grounded': is_grounded,
+            'spatial_specificity': spatial_specificity,
         })
 
     grounding_rate = sum(1 for r in results if r['is_grounded']) / max(len(results), 1)
+    avg_specificity = np.mean([r['spatial_specificity'] for r in results])
     return {
         'pathology': 'grounding_failure',
         'grounding_rate': round(grounding_rate, 3),
+        'avg_spatial_specificity': round(float(avg_specificity), 3),
         'status': 'PASS' if grounding_rate > 0.5 else 'WARN' if grounding_rate > 0.2 else 'FAIL',
         'details': results,
     }
+
+
+def _assess_spatial_specificity(response):
+    """[v6 NEW] 评估描述的空间特异性 — 具体 vs 模板化
+
+    检测描述是否包含：位置词、颜色词、形状词、数量词。
+    返回 0-1 评分，1 表示高特异性。
+    """
+    if not response or len(response) < 5:
+        return 0.0
+
+    specificity_signals = 0
+    total_checks = 4
+
+    # 位置词
+    position_words = ['左', '右', '上', '下', '中间', '旁边', '前', '后', '角', '边',
+                      'left', 'right', 'top', 'bottom', 'center', 'middle']
+    if any(w in response for w in position_words):
+        specificity_signals += 1
+
+    # 颜色词
+    color_words = ['红', '蓝', '绿', '黄', '白', '黑', '紫', '橙', '灰', '粉', '棕',
+                   'red', 'blue', 'green', 'yellow', 'white', 'black']
+    if any(w in response for w in color_words):
+        specificity_signals += 1
+
+    # 形状/大小词
+    shape_words = ['圆', '方', '长', '短', '大', '小', '宽', '窄', '高', '矮', '细',
+                   'round', 'square', 'large', 'small', 'tall']
+    if any(w in response for w in shape_words):
+        specificity_signals += 1
+
+    # 数量词（具体数字）
+    import re as _re
+    if _re.search(r'\d+', response) or any(w in response for w in ['一个', '两个', '三个', '几个', '多个']):
+        specificity_signals += 1
+
+    return specificity_signals / total_checks
 
 
 # ══════════════════════════════════════════════════════════
@@ -483,29 +714,69 @@ AI回答：{resp[:200]}
 # ══════════════════════════════════════════════════════════
 
 def plot_repetition_trend(results):
-    """Fig 8: 折线图 — 各阶段的 4-gram 重复率"""
+    """Fig 8: 折线图 + 散点 — 各阶段的 4-gram 重复率（均值+逐 prompt 展开）"""
     stages_found = []
     rates = []
+    per_prompt_data = {}  # prompt_idx -> [rate_per_stage]
+
     for stage in STAGE_ORDER:
         key = f'token_repetition_{stage}'
         r = results.get(key)
         if r and 'avg_4gram_rate' in r:
             stages_found.append(stage.upper())
             rates.append(r['avg_4gram_rate'])
+            # Collect per-prompt rates
+            details = r.get('details', [])
+            for pi, detail in enumerate(details):
+                rate_4g = detail.get('ngram_repetition', {}).get('4gram', 0)
+                per_prompt_data.setdefault(pi, []).append(rate_4g)
 
     if not stages_found:
         return
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(stages_found, rates, marker='o', linewidth=2, markersize=8, color='#e15759')
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    # Per-prompt scatter dots (semi-transparent, to show variance)
+    prompt_labels = [p[:8] + '…' for p in REPETITION_PROMPTS]
+    cmap = plt.cm.Set2
+    for pi, prompt_rates in per_prompt_data.items():
+        # Align with stages found
+        x_indices = list(range(len(prompt_rates)))
+        ax.scatter(x_indices, prompt_rates, s=50, alpha=0.5,
+                   color=cmap(pi % 8), zorder=3,
+                   label=prompt_labels[pi] if pi < len(prompt_labels) else f'P{pi+1}')
+
+    # Aggregate mean line (bold, on top)
+    ax.plot(range(len(stages_found)), rates, marker='D', linewidth=2.5, markersize=9,
+            color='#e15759', zorder=5, label='Mean 4-gram rate')
+    # Value annotations on mean line
+    for i, r in enumerate(rates):
+        ax.annotate(f'{r:.3f}', (i, r), textcoords='offset points',
+                    xytext=(0, 10), ha='center', fontsize=9, fontweight='bold',
+                    color='#e15759')
+
     ax.axhline(y=0.3, color='red', linestyle='--', alpha=0.5, label='Pathology threshold')
     ax.axhline(y=0.15, color='orange', linestyle='--', alpha=0.5, label='Warning threshold')
+    ax.set_xticks(range(len(stages_found)))
+    ax.set_xticklabels(stages_found)
     ax.set_xlabel('Training Stage')
     ax.set_ylabel('4-gram Repetition Rate')
-    ax.set_title('Fig 8. Repetition Rate Trend', fontsize=14, fontweight='bold')
-    ax.legend()
-    ax.set_ylim(0, max(max(rates) * 1.3, 0.4))
+    ax.set_title('Fig 8. Repetition Rate Trend (per-prompt detail)', fontsize=14, fontweight='bold')
+    ax.legend(fontsize=8, loc='upper left', ncol=2)
+    ax.set_ylim(0, max(max(rates) * 1.3,
+                       max(max(pr) for pr in per_prompt_data.values()) * 1.15,
+                       0.4))
     ax.grid(True, alpha=0.3)
+
+    # Annotate stage-to-stage deltas
+    for i in range(1, len(rates)):
+        delta = rates[i] - rates[i - 1]
+        mid_y = (rates[i] + rates[i - 1]) / 2
+        color = '#e15759' if delta > 0 else '#59a14f'
+        ax.annotate(f'{delta:+.3f}', ((i + i - 1) / 2, mid_y),
+                    fontsize=8, ha='center', color=color, fontweight='bold',
+                    bbox=dict(boxstyle='round,pad=0.15', fc='white', ec=color, alpha=0.7))
+
     save_figure(fig, 'fig08_repetition_trend.png')
 
 
@@ -514,7 +785,7 @@ def plot_repetition_trend(results):
 # ══════════════════════════════════════════════════════════
 
 def plot_paraphrase_consistency(results):
-    """Fig 9: 柱状图 — 各问题组的 consistency rate"""
+    """Fig 9: 柱状图 — 各问题组的 consistency rate + 子维度分解"""
     key = 'format_overfitting_sft'
     r = results.get(key)
     if not r or 'details' not in r:
@@ -525,20 +796,54 @@ def plot_paraphrase_consistency(results):
     consistencies = [d['group_consistency'] for d in details]
     colors = ['#59a14f' if d['consistent'] else '#e15759' for d in details]
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    bars = ax.bar(range(len(labels)), consistencies, color=colors, edgecolor='black', linewidth=0.5)
-    ax.set_xticks(range(len(labels)))
-    ax.set_xticklabels(labels, rotation=30, ha='right', fontsize=9)
-    ax.set_ylabel('Group Consistency Rate')
-    ax.set_title('Fig 9. Paraphrase Consistency (SFT)', fontsize=14, fontweight='bold')
-    ax.axhline(y=0.5, color='red', linestyle='--', alpha=0.5, label='Consistency threshold')
-    ax.legend()
-    ax.set_ylim(0, 1.0)
-    ax.grid(axis='y', alpha=0.3)
+    # Check if subscores are available
+    has_subscores = all('subscores' in d and d['subscores'] for d in details)
+
+    if has_subscores:
+        fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(10, 8),
+                                              gridspec_kw={'height_ratios': [3, 2]})
+    else:
+        fig, ax_top = plt.subplots(figsize=(10, 5))
+        ax_bot = None
+
+    # ---- Top: overall consistency bars (same as before) ----
+    bars = ax_top.bar(range(len(labels)), consistencies, color=colors,
+                      edgecolor='black', linewidth=0.5)
+    ax_top.set_xticks(range(len(labels)))
+    ax_top.set_xticklabels(labels, rotation=30, ha='right', fontsize=9)
+    ax_top.set_ylabel('Group Consistency Rate')
+    ax_top.set_title('Fig 9. Paraphrase Consistency (SFT)', fontsize=14, fontweight='bold')
+    ax_top.axhline(y=0.5, color='red', linestyle='--', alpha=0.5, label='Consistency threshold')
+    ax_top.legend()
+    ax_top.set_ylim(0, 1.0)
+    ax_top.grid(axis='y', alpha=0.3)
 
     for bar, v in zip(bars, consistencies):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
-                f'{v:.2f}', ha='center', fontsize=9)
+        ax_top.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
+                    f'{v:.2f}', ha='center', fontsize=9)
+
+    # ---- Bottom: decomposed sub-scores ----
+    if ax_bot is not None and has_subscores:
+        n = len(details)
+        x = np.arange(n)
+        bar_w = 0.25
+        sub_keys = ['topic_match', 'entity_match', 'structure_match']
+        sub_labels = ['Topic Match', 'Entity Match', 'Structure Match']
+        sub_colors = ['#4e79a7', '#f28e2b', '#76b7b2']
+
+        for k_idx, (key_name, label, color) in enumerate(zip(sub_keys, sub_labels, sub_colors)):
+            vals = [d['subscores'].get(key_name, 0) for d in details]
+            offset = (k_idx - 1) * bar_w
+            ax_bot.bar(x + offset, vals, bar_w, label=label, color=color,
+                       edgecolor='black', linewidth=0.3, alpha=0.85)
+
+        ax_bot.set_xticks(x)
+        ax_bot.set_xticklabels(labels, rotation=30, ha='right', fontsize=9)
+        ax_bot.set_ylabel('Sub-score (0-1)')
+        ax_bot.set_title('Consistency Sub-scores', fontsize=11, fontstyle='italic')
+        ax_bot.set_ylim(0, 1.1)
+        ax_bot.legend(fontsize=8, loc='upper right')
+        ax_bot.grid(axis='y', alpha=0.3)
 
     plt.tight_layout()
     save_figure(fig, 'fig09_paraphrase_consistency.png')
@@ -586,8 +891,9 @@ def plot_mode_collapse_matrix(results):
 # 可视化: Fig 11 – Visual Dependency Scores
 # ══════════════════════════════════════════════════════════
 
-def plot_visual_dependency(shortcut_result):
-    """Fig 11: 分组柱状图 — 每张图的 real/blank/noise 差异"""
+def plot_visual_dependency(shortcut_result, hallucination_attribution=None):
+    """Fig 11: 分组柱状图 — 每张图的 real/blank/noise 差异
+    [v6 ENHANCED] 增加幻觉来源归因标注"""
     if not shortcut_result or 'details' not in shortcut_result:
         return
 
@@ -610,10 +916,19 @@ def plot_visual_dependency(shortcut_result):
                        rotation=30, ha='right', fontsize=9)
     ax.set_ylabel('Score')
     ax.set_title('Fig 11. Visual Dependency Scores', fontsize=14, fontweight='bold')
-    ax.legend()
     ax.set_ylim(0, 1.1)
     ax.axhline(y=0.2, color='red', linestyle='--', alpha=0.5, label='Shortcut threshold')
+    ax.legend()
     ax.grid(axis='y', alpha=0.3)
+
+    # [v6 NEW] 幻觉来源归因标注
+    if hallucination_attribution:
+        source = hallucination_attribution.get('primary_source', '')
+        ax.annotate(f'幻觉主因: {source}',
+                    xy=(0.98, 0.02), xycoords='axes fraction',
+                    ha='right', va='bottom', fontsize=10, fontweight='bold',
+                    bbox=dict(boxstyle='round,pad=0.3', fc='#f8d7da', alpha=0.9))
+
     plt.tight_layout()
     save_figure(fig, 'fig11_visual_dependency.png')
 
@@ -623,34 +938,40 @@ def plot_visual_dependency(shortcut_result):
 # ══════════════════════════════════════════════════════════
 
 def plot_hallucination_grounding(hall_result, grounding_result):
-    """Fig 12: 双轴柱状图 — hallucination rate + grounding rate"""
+    """Fig 12: 分组柱状图 — hallucination rate + grounding rate (单轴，同量纲)"""
     if not hall_result and not grounding_result:
         return
 
-    fig, ax1 = plt.subplots(figsize=(8, 5))
-    labels = ['VLM-SFT']
-    x = np.arange(len(labels))
+    fig, ax = plt.subplots(figsize=(8, 5))
+    labels = []
+    values = []
+    colors = []
 
     if hall_result:
-        ax1.bar(x - 0.15, [hall_result['hallucination_rate']], 0.3,
-                label='Hallucination Rate', color='#e15759')
-    ax1.set_ylabel('Hallucination Rate', color='#e15759')
-
-    ax2 = ax1.twinx()
+        labels.append('Hallucination Rate')
+        values.append(hall_result['hallucination_rate'])
+        colors.append('#e15759')
     if grounding_result:
-        ax2.bar(x + 0.15, [grounding_result['grounding_rate']], 0.3,
-                label='Grounding Rate', color='#59a14f')
-    ax2.set_ylabel('Grounding Rate', color='#59a14f')
+        labels.append('Grounding Rate')
+        values.append(grounding_result['grounding_rate'])
+        colors.append('#59a14f')
+        if 'spatial_specificity' in grounding_result:
+            labels.append('Spatial Specificity')
+            values.append(grounding_result['spatial_specificity'])
+            colors.append('#4e79a7')
 
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(labels)
-    ax1.set_ylim(0, 1.1)
-    ax2.set_ylim(0, 1.1)
-    ax1.set_title('Fig 12. Hallucination & Grounding', fontsize=14, fontweight='bold')
+    x = np.arange(len(labels))
+    bars = ax.bar(x, values, 0.5, color=colors, edgecolor='black', linewidth=0.5)
+    for bar, v in zip(bars, values):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
+                f'{v:.2f}', ha='center', va='bottom', fontsize=11, fontweight='bold')
 
-    lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=10)
+    ax.set_ylim(0, 1.1)
+    ax.set_ylabel('Rate (0–1)')
+    ax.set_title('Fig 12. Hallucination & Grounding (VLM-SFT)', fontsize=14, fontweight='bold')
+    ax.grid(axis='y', alpha=0.3)
 
     save_figure(fig, 'fig12_hallucination_grounding.png')
 
@@ -691,6 +1012,7 @@ def run_module3():
     shortcut_result = None
     hall_result = None
     grounding_result = None
+    hallucination_attribution = None
 
     if vlm_checkpoints_available():
         test_images = _load_test_images()
@@ -717,11 +1039,21 @@ def run_module3():
             print(f"    Hallucination rate: {hall_result['hallucination_rate']} "
                   f"[{hall_result['status']}]")
 
+            # [v6 NEW] 幻觉来源归因
+            if hall_result['hallucination_rate'] > 0:
+                print("\n  [VLM] Hallucination Source Attribution...")
+                hallucination_attribution = attribute_hallucination_source(
+                    model, tokenizer, test_images, shortcut_result)
+                results['hallucination_attribution'] = hallucination_attribution
+                print(f"    Primary source: {hallucination_attribution['primary_source']}")
+                print(f"    Evidence: {hallucination_attribution['evidence']}")
+
             print("\n  [VLM] Grounding Failure...")
             grounding_result = detect_grounding_failure(model, tokenizer, test_images)
             results['grounding_failure'] = grounding_result
             print(f"    Grounding rate: {grounding_result['grounding_rate']} "
                   f"[{grounding_result['status']}]")
+            print(f"    Spatial specificity: {grounding_result.get('avg_spatial_specificity', 'N/A')}")
             del model
             torch.cuda.empty_cache()
     else:
@@ -735,7 +1067,7 @@ def run_module3():
     plot_paraphrase_consistency(results)
     plot_mode_collapse_matrix(results)
     if shortcut_result:
-        plot_visual_dependency(shortcut_result)
+        plot_visual_dependency(shortcut_result, hallucination_attribution)
     if hall_result or grounding_result:
         plot_hallucination_grounding(hall_result, grounding_result)
 
@@ -773,22 +1105,8 @@ def run_module3():
 
 
 def _load_test_images():
-    """加载VLM测试图片"""
-    from PIL import Image
-    images_dir = os.path.join(os.path.dirname(__file__), '..', 'images')
-    test_images = []
-    if os.path.isdir(images_dir):
-        for fname in sorted(os.listdir(images_dir)):
-            if fname.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
-                img_path = os.path.join(images_dir, fname)
-                try:
-                    img = Image.open(img_path).convert('RGB')
-                    test_images.append({'id': fname, 'image': img})
-                except Exception:
-                    continue
-                if len(test_images) >= 15:
-                    break
-    return test_images
+    """加载VLM测试图片（使用集中式加载器，含 ground truth 标注）"""
+    return load_test_images(max_images=15)
 
 
 if __name__ == '__main__':

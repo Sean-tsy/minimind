@@ -1,0 +1,155 @@
+[
+  {
+    "id": "LLM-structure.jpg",
+    "description": "一张展示大语言模型（LLM）架构的技术示意图，包含Transformer模块、注意力机制和前馈网络等组件",
+    "qa": [
+      {"question": "这张图展示的是什么？", "answer": "大语言模型的架构示意图"},
+      {"question": "图中包含哪些神经网络组件？", "answer": "注意力机制、前馈网络等Transformer组件"}
+    ],
+    "distractor": "一群企鹅在南极冰面上行走，背景是蓝色的冰川"
+  },
+  {
+    "id": "LLM-structure-moe.jpg",
+    "description": "一张展示混合专家（MoE）模型架构的技术示意图，包含多个专家模块和路由机制",
+    "qa": [
+      {"question": "这张图展示的是什么类型的模型？", "answer": "混合专家（MoE）模型架构"},
+      {"question": "图中的路由机制是做什么的？", "answer": "将输入分配给不同的专家模块"}
+    ],
+    "distractor": "一只橙色的猫躺在阳光明媚的窗台上睡觉"
+  },
+  {
+    "id": "dataset.jpg",
+    "description": "一张展示数据集构成或数据处理流程的示意图，可能包含数据来源、清洗和标注等步骤",
+    "qa": [
+      {"question": "这张图展示的是什么？", "answer": "数据集构成或数据处理流程"},
+      {"question": "图中涉及哪些数据处理步骤？", "answer": "数据来源、清洗、标注等步骤"}
+    ],
+    "distractor": "一座高山上覆盖着白雪，山脚下是绿色的草原"
+  },
+  {
+    "id": "pretrain_loss.jpg",
+    "description": "一张预训练阶段的损失函数（loss）曲线图，横轴为训练步数，纵轴为loss值，曲线呈下降趋势",
+    "qa": [
+      {"question": "这张图展示的是什么指标？", "answer": "预训练阶段的损失函数曲线"},
+      {"question": "曲线的趋势是什么？", "answer": "随训练步数增加，loss值逐渐下降"}
+    ],
+    "distractor": "一个热闹的菜市场，摊位上摆满了各种新鲜蔬菜和水果"
+  },
+  {
+    "id": "sft_loss.jpg",
+    "description": "一张监督微调（SFT）阶段的损失函数曲线图，展示训练过程中loss的变化趋势",
+    "qa": [
+      {"question": "这是哪个训练阶段的loss曲线？", "answer": "监督微调（SFT）阶段"},
+      {"question": "曲线整体趋势如何？", "answer": "loss值随训练逐渐下降收敛"}
+    ],
+    "distractor": "夜晚的城市天际线，高楼大厦灯火通明，倒映在河面上"
+  },
+  {
+    "id": "grpo_loss.jpg",
+    "description": "一张GRPO（强化学习优化）阶段的损失函数曲线图，展示策略优化过程中的训练动态",
+    "qa": [
+      {"question": "这张图属于哪个训练阶段？", "answer": "GRPO强化学习优化阶段"},
+      {"question": "图中展示了什么信息？", "answer": "策略优化过程中的loss变化"}
+    ],
+    "distractor": "一只金色的拉布拉多犬在海滩上奔跑，溅起水花"
+  },
+  {
+    "id": "ppo_loss.jpg",
+    "description": "一张PPO（近端策略优化）训练阶段的损失函数曲线图，横轴为训练步数",
+    "qa": [
+      {"question": "这是什么算法的训练曲线？", "answer": "PPO近端策略优化算法"},
+      {"question": "图表类型是什么？", "answer": "损失函数随训练步数变化的折线图"}
+    ],
+    "distractor": "一间温馨的咖啡厅，木质桌椅旁摆放着绿色植物"
+  },
+  {
+    "id": "benchmark_radar.jpg",
+    "description": "一张模型性能基准测试的雷达图（radar chart），展示模型在多个评测维度上的得分",
+    "qa": [
+      {"question": "这张图使用的是什么类型的图表？", "answer": "雷达图（radar chart）"},
+      {"question": "图中展示了什么信息？", "answer": "模型在多个评测维度上的性能得分"}
+    ],
+    "distractor": "一片金黄色的麦田，远处是蓝天白云和几棵大树"
+  },
+  {
+    "id": "rl-structure.jpg",
+    "description": "一张展示强化学习（RL）训练框架结构的示意图，包含策略网络、奖励模型等组件",
+    "qa": [
+      {"question": "这张图展示的是什么框架？", "answer": "强化学习训练框架结构"},
+      {"question": "图中包含哪些关键组件？", "answer": "策略网络、奖励模型等组件"}
+    ],
+    "distractor": "一个小女孩在公园里放风筝，周围是盛开的樱花树"
+  },
+  {
+    "id": "gpt3_config.png",
+    "description": "一张展示GPT-3模型配置参数的表格或示意图，包含模型大小、层数、隐藏维度等超参数",
+    "qa": [
+      {"question": "这张图展示的是哪个模型的配置？", "answer": "GPT-3模型的配置参数"},
+      {"question": "包含哪些类型的参数信息？", "answer": "模型大小、层数、隐藏维度等超参数"}
+    ],
+    "distractor": "一艘帆船在平静的湖面上航行，背景是连绵的青山"
+  },
+  {
+    "id": "rope_ppl.png",
+    "description": "一张展示RoPE位置编码对困惑度（perplexity）影响的折线图或柱状图",
+    "qa": [
+      {"question": "这张图研究的是什么技术？", "answer": "RoPE位置编码"},
+      {"question": "图中的纵轴指标是什么？", "answer": "困惑度（perplexity）"}
+    ],
+    "distractor": "一只彩色的鹦鹉站在热带树枝上，背景是茂密的雨林"
+  },
+  {
+    "id": "agent_rl_loss.jpg",
+    "description": "一张智能体（agent）强化学习训练的损失曲线图，展示agent训练过程中的loss变化",
+    "qa": [
+      {"question": "这张图属于什么类型的训练？", "answer": "智能体强化学习训练"},
+      {"question": "图中展示了什么趋势？", "answer": "agent训练过程中loss的变化趋势"}
+    ],
+    "distractor": "一座古老的石桥横跨在清澈的小溪上，两岸长满了青苔"
+  },
+  {
+    "id": "agent_webui.jpg",
+    "description": "一张智能体（agent）Web界面的截图，展示用户与AI agent交互的对话界面",
+    "qa": [
+      {"question": "这张图展示的是什么？", "answer": "AI智能体的Web交互界面"},
+      {"question": "界面的主要功能是什么？", "answer": "用户与AI agent进行对话交互"}
+    ],
+    "distractor": "一个繁忙的火车站大厅，旅客们拖着行李匆忙走过"
+  },
+  {
+    "id": "logo.png",
+    "description": "MiniMind项目的Logo图标，一个带有文字标识的品牌标志图片",
+    "qa": [
+      {"question": "这张图片是什么？", "answer": "MiniMind项目的Logo"},
+      {"question": "图片的用途是什么？", "answer": "作为项目的品牌标识"}
+    ],
+    "distractor": "一片星空下的沙漠，沙丘呈现优美的曲线"
+  },
+  {
+    "id": "with_huggingface.png",
+    "description": "一张展示项目与HuggingFace平台集成的示意图或截图，包含HuggingFace的标志",
+    "qa": [
+      {"question": "这张图涉及哪个平台？", "answer": "HuggingFace平台"},
+      {"question": "图片展示的是什么内容？", "answer": "项目与HuggingFace的集成或关联"}
+    ],
+    "distractor": "一个小男孩在沙滩上堆沙堡，旁边是蓝色的大海"
+  },
+  {
+    "id": "logo2.png",
+    "description": "MiniMind项目的第二个Logo图标，一个带有品牌标识的图片",
+    "qa": [
+      {"question": "这张图片是什么？", "answer": "MiniMind项目的Logo变体"},
+      {"question": "图片的用途是什么？", "answer": "作为项目的品牌标识"}
+    ],
+    "distractor": "一片秋天的枫叶林，红色和金色的树叶铺满了地面"
+  },
+  {
+    "id": "with_modelscope.png",
+    "description": "一张展示项目与ModelScope平台集成的示意图或截图，包含ModelScope的标志",
+    "qa": [
+      {"question": "这张图涉及哪个平台？", "answer": "ModelScope平台"},
+      {"question": "图片展示的是什么内容？", "answer": "项目与ModelScope的集成或关联"}
+    ],
+    "distractor": "一只白色的兔子在草地上蹦跳，周围开满了野花"
+  }
+]

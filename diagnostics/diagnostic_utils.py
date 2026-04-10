@@ -91,7 +91,8 @@ def load_vlm_model(ckpt_name, device=None):
     device = device or DEVICE
     from model.model_vlm import VLMConfig, MiniMindVLM
     config = VLMConfig(hidden_size=768, num_hidden_layers=8)
-    model = MiniMindVLM(config)
+    vision_model_path = os.path.join(ROOT_DIR, 'model', 'siglip2-base-p16-ve')
+    model = MiniMindVLM(config, vision_model_path=vision_model_path)
     ckpt_path = os.path.join(CHECKPOINT_DIR, f'{ckpt_name}.pth')
     state_dict = torch.load(ckpt_path, map_location=device, weights_only=True)
     model.load_state_dict(state_dict, strict=False)
@@ -223,8 +224,23 @@ def gemini_score(question, response, dimension, scale='1-5'):
 def save_json(data, filename):
     """保存 JSON 到顶层 results/raw 目录"""
     path = os.path.join(RESULTS_DIR, filename)
+
+    class _Encoder(json.JSONEncoder):
+        def default(self, obj):
+            if isinstance(obj, torch.Tensor):
+                return None  # skip tensors
+            if isinstance(obj, (np.integer,)):
+                return int(obj)
+            if isinstance(obj, (np.floating,)):
+                return float(obj)
+            if isinstance(obj, (np.bool_,)):
+                return bool(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            return super().default(obj)
+
     with open(path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        json.dump(data, f, ensure_ascii=False, indent=2, cls=_Encoder)
     print(f"  Saved: {path}")
 
 
@@ -235,6 +251,49 @@ def load_json(filename):
         with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
     return None
+
+
+def load_test_images(max_images=15):
+    """加载 VLM 测试图片，带 ground truth 描述、QA 和 distractor 标注。
+
+    返回 list[dict]，每个 dict 包含:
+        id, image (PIL.Image), description, qa (list), distractor
+    """
+    from PIL import Image
+
+    images_dir = os.path.join(ROOT_DIR, 'images')
+    annotations_path = os.path.join(os.path.dirname(__file__), 'vlm_test_data.json')
+
+    # 加载标注文件
+    annotations = {}
+    if os.path.exists(annotations_path):
+        with open(annotations_path, 'r', encoding='utf-8') as f:
+            for entry in json.load(f):
+                annotations[entry['id']] = entry
+
+    test_images = []
+    if os.path.isdir(images_dir):
+        for fname in sorted(os.listdir(images_dir)):
+            if fname.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
+                if fname.lower().endswith('.gif'):
+                    continue
+                img_path = os.path.join(images_dir, fname)
+                try:
+                    img = Image.open(img_path).convert('RGB')
+                except Exception:
+                    continue
+                ann = annotations.get(fname, {})
+                desc = ann.get('description', '') or f'一张名为{fname}的图片'
+                test_images.append({
+                    'id': fname,
+                    'image': img,
+                    'description': desc,
+                    'qa': ann.get('qa', []),
+                    'distractor': ann.get('distractor', '一群企鹅在沙漠中行走'),
+                })
+                if len(test_images) >= max_images:
+                    break
+    return test_images
 
 
 def print_header(title):
