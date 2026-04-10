@@ -6,8 +6,11 @@ website/
 docs-minimind/
 dataset/*.jsonl
 dataset/*.json
+dataset/*.parquet
 out/*.pth
 checkpoints/
+# 视觉编码器（178MB）
+model/siglip2-base-p16-ve/
 # 奖励模型
 internlm2-1_8b-reward/
 # 虚拟环境
@@ -16,4 +19,9 @@ minimind-env/
 # wandb/swanlab 日志
 wandb/
 swanlab_logs/
+# 训练日志
+logs/
+# 诊断产出（可重新生成）
+results/
+report/
 *.sh
