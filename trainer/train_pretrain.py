@@ -119,7 +119,7 @@ if __name__ == "__main__":
     device_type = "cuda" if "cuda" in args.device else "cpu"
     dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
     autocast_ctx = nullcontext() if device_type == "cpu" else torch.cuda.amp.autocast(dtype=dtype)
-    
+    #数值表示精度，主要根据不同环节的需求和硬件支持来选择。float16和bfloat16都是16位的浮点数格式，但bfloat16在表示范围上更大，适合训练大型模型时使用，而float16在某些硬件上可能会有更好的性能表现。
     # ========== 4. 配wandb ==========
     wandb = None
     if args.use_wandb and is_main_process():
@@ -134,7 +134,7 @@ if __name__ == "__main__":
     train_ds = PretrainDataset(args.data_path, tokenizer, max_length=args.max_seq_len)
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
     scaler = torch.cuda.amp.GradScaler(enabled=(args.dtype == 'float16'))
-    optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate)
+    optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate) #选择AdamW优化器，适合Transformer模型的训练
     
     # ========== 6. 从ckp恢复状态 ==========
     start_epoch, start_step = 0, 0
@@ -144,7 +144,7 @@ if __name__ == "__main__":
         scaler.load_state_dict(ckp_data['scaler'])
         start_epoch = ckp_data['epoch']
         start_step = ckp_data.get('step', 0)
-    
+    # 从ckp恢复状态的步骤确保了训练过程的连续性，允许在中断后继续训练，而不必从头开始。这对于长时间训练大型模型尤其重要，可以节省大量时间和计算资源。
     # ========== 7. 编译和分布式包装 ==========
     if args.use_compile == 1:
         model = torch.compile(model)
@@ -152,7 +152,7 @@ if __name__ == "__main__":
     if dist.is_initialized():
         model._ddp_params_and_buffers_to_ignore = {"freqs_cos", "freqs_sin"}
         model = DistributedDataParallel(model, device_ids=[local_rank])
-    
+    # 分布式包装确保了模型在多GPU环境下的正确训练，能够有效地利用多个GPU的计算资源，加速训练过程。同时，指定忽略某些参数和缓冲区可以避免在分布式训练中出现不必要的通信开销，提高效率。
     # ========== 8. 开始训练 ==========
     for epoch in range(start_epoch, args.epochs):
         train_sampler and train_sampler.set_epoch(epoch)

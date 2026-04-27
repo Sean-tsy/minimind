@@ -532,11 +532,11 @@ AI描述：{resp[:300]}
 
 
 # ══════════════════════════════════════════════════════════
-# [v6 NEW] 3.7.1 幻觉来源归因
+# 3.7.1 幻觉来源归因
 # ══════════════════════════════════════════════════════════
 
 def attribute_hallucination_source(model, tokenizer, test_images, shortcut_result=None):
-    """[v6 NEW] 检测到幻觉后，归因到 Jing et al. 三个组件来源。
+    """ 检测到幻觉后，归因到 Jing et al. 三个组件来源。
 
     归因流程：
     1. LLM 语言先验主导？ → 遮蔽实验: visual_dependency < 0.2

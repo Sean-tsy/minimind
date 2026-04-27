@@ -165,10 +165,17 @@ def extract_key_findings(results):
             hr = m1[key].get('harmful_refusal_rate', 0)
             findings.append(f"{stage.upper()} harmful refusal rate: {hr:.0%}")
 
-    # [v6 NEW] Alignment tax
+    # [v6] Alignment tax (SFT baseline vs GRPO / DPO)
     atax = m1.get('alignment_tax', {})
     if atax:
-        findings.append(f"Alignment tax (GRPO→DPO): {atax.get('avg_tax', 0):+.2f} [{atax.get('status', '')}]")
+        if 'avg_tax_grpo' in atax:
+            findings.append(
+                f"Alignment tax (SFT→GRPO): {atax.get('avg_tax_grpo', 0):+.2f} [{atax.get('status_grpo', '')}]"
+            )
+        if 'avg_tax_dpo' in atax:
+            findings.append(
+                f"Alignment tax (SFT→DPO): {atax.get('avg_tax_dpo', 0):+.2f} [{atax.get('status_dpo', '')}]"
+            )
 
     # Module 2 - forgetting
     m2 = results.get('module2', {})
@@ -238,18 +245,24 @@ def generate_markdown_report(results):
                 score_key = next((k for k in ['avg_score', 'rate', 'harmful_refusal_rate'] if k in val), None)
                 score = val.get(score_key, '') if score_key else ''
                 lines.append(f'| {stage} | {metric} | {score} | {val["status"]} |')
-        # [v6 NEW] Alignment tax
+        # [v6] Alignment tax (SFT baseline)
         atax = m1.get('alignment_tax', {})
         if atax:
             lines.append('')
-            lines.append('### Alignment Tax (GRPO → DPO)\n')
-            lines.append(f'Average alignment tax: **{atax.get("avg_tax", 0):+.2f}** [{atax.get("status", "")}]\n')
+            lines.append('### Alignment Tax (baseline = SFT)\n')
+            lines.append(
+                f'Average tax  GRPO: **{atax.get("avg_tax_grpo", 0):+.2f}** [{atax.get("status_grpo", "")}]  |  '
+                f'DPO: **{atax.get("avg_tax_dpo", 0):+.2f}** [{atax.get("status_dpo", "")}]\n'
+            )
             per_dim = atax.get('per_dimension', {})
             if per_dim:
-                lines.append('| Dimension | Before DPO | After DPO | Tax |')
-                lines.append('|-----------|-----------|----------|-----|')
+                lines.append('| Dimension | SFT | GRPO | Tax(GRPO) | DPO | Tax(DPO) |')
+                lines.append('|-----------|-----|------|-----------|-----|----------|')
                 for dim, info in per_dim.items():
-                    lines.append(f'| {dim} | {info["before_dpo"]} | {info["after_dpo"]} | {info["tax"]:+.2f} |')
+                    lines.append(
+                        f'| {dim} | {info["sft"]} | {info["grpo"]} | {info["tax_grpo"]:+.2f} | '
+                        f'{info["dpo"]} | {info["tax_dpo"]:+.2f} |'
+                    )
         lines.append('')
 
     # ---- Module 2 ----

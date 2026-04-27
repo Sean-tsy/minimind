@@ -202,9 +202,33 @@ def parameter_drift_summary(drift_by_module):
 # 4.2 Representation Similarity Analysis
 # ══════════════════════════════════════════════════════════
 
+def linear_cka(X, Y, eps=1e-8):
+    """Linear CKA (Kornblith et al., 2019).
+
+    X, Y: [N, D] tensors (N = #samples, D = hidden dim).
+    返回 [0, 1] 标量。对正交变换、各向同性缩放不变。
+    采用高效形式: CKA = ||X^T Y||_F^2 / (||X^T X||_F · ||Y^T Y||_F),
+    其中 X, Y 已做样本维零均值化。
+    """
+    X = X.float()
+    Y = Y.float()
+    # center along sample dim
+    X = X - X.mean(dim=0, keepdim=True)
+    Y = Y - Y.mean(dim=0, keepdim=True)
+
+    # cross-covariance Frobenius norm squared
+    xty = X.t() @ Y                       # [D, D]
+    num = (xty ** 2).sum()                # ||X^T Y||_F^2
+
+    xtx = X.t() @ X
+    yty = Y.t() @ Y
+    denom = torch.sqrt((xtx ** 2).sum()) * torch.sqrt((yty ** 2).sum())
+    return float((num / (denom + eps)).item())
+
+
 @torch.no_grad()
 def get_layer_representations(model, tokenizer, prompts, device=None):
-    """提取每一层平均 hidden state"""
+    """提取每一层 hidden state, 返回 list of [N, D] 矩阵 (N=#prompts)."""
     device = device or model.device
     n_layers = len(model.model.layers)
     layer_outputs = [[] for _ in range(n_layers)]
@@ -213,7 +237,7 @@ def get_layer_representations(model, tokenizer, prompts, device=None):
     for i, layer in enumerate(model.model.layers):
         def make_hook(idx):
             def hook_fn(module, inp, out):
-                # out 可能是 tuple
+                # out 可能是 tuple; 对 seq_len 求平均 -> [1, D]
                 h = out[0] if isinstance(out, tuple) else out
                 layer_outputs[idx].append(h.detach().mean(dim=1).cpu())
             return hook_fn
@@ -226,20 +250,23 @@ def get_layer_representations(model, tokenizer, prompts, device=None):
     for h in hooks:
         h.remove()
 
-    # 对所有 prompt 取平均
+    # 保留 prompt 维: 每层得到 [N_prompts, D] 矩阵
     representations = []
     for idx in range(n_layers):
         if layer_outputs[idx]:
-            avg = torch.cat(layer_outputs[idx]).mean(dim=0)
-            representations.append(avg)
+            mat = torch.cat(layer_outputs[idx], dim=0)  # [N, D]
+            representations.append(mat)
         else:
-            representations.append(torch.zeros(model.config.hidden_size))
+            representations.append(torch.zeros(len(prompts), model.config.hidden_size))
 
     return representations
 
 
 def layer_representation_similarity(stage_a, stage_b, tokenizer):
-    """逐层计算两个阶段的表征相似度"""
+    """逐层计算两个阶段的表征相似度: 同时返回 Linear CKA 与平均 cosine.
+
+    返回: {'cka': [...per layer], 'cosine': [...per layer]}
+    """
     model_a = load_model(STAGES[stage_a], flash_attn=False)
     repr_a = get_layer_representations(model_a, tokenizer, REPR_PROMPTS)
     del model_a
@@ -250,14 +277,19 @@ def layer_representation_similarity(stage_a, stage_b, tokenizer):
     del model_b
     torch.cuda.empty_cache()
 
-    similarities = []
-    for a, b in zip(repr_a, repr_b):
+    cka_list, cos_list = [], []
+    for A, B in zip(repr_a, repr_b):
+        # CKA: 正交/缩放不变, 在 [N, D] 上比较结构
+        cka_list.append(round(linear_cka(A, B), 4))
+        # Cosine: 先按样本求平均向量再算余弦, 作为参考基线
+        a_mean = A.mean(dim=0)
+        b_mean = B.mean(dim=0)
         cos = torch.nn.functional.cosine_similarity(
-            a.unsqueeze(0), b.unsqueeze(0)
+            a_mean.unsqueeze(0), b_mean.unsqueeze(0)
         ).item()
-        similarities.append(round(cos, 4))
+        cos_list.append(round(cos, 4))
 
-    return similarities
+    return {'cka': cka_list, 'cosine': cos_list}
 
 
 # ══════════════════════════════════════════════════════════
@@ -265,41 +297,53 @@ def layer_representation_similarity(stage_a, stage_b, tokenizer):
 # ══════════════════════════════════════════════════════════
 
 def plot_representation_similarity(all_sim_results):
-    """Fig 14: 逐层表征相似度 [v6 ENHANCED: 标注 Laitinen 预期范围]"""
+    """Fig 14: 逐层表征相似度 — 主线 Linear CKA, 虚线参考 mean-cosine."""
     fig, ax = plt.subplots(figsize=(10, 5))
 
     markers = ['o', 's', 'D', '^', 'v', 'P', 'X']
-    linestyles = ['-', '--', '-.', ':', '-', '--', '-.']
     cmap = plt.cm.tab10
 
+    all_cka_vals = []
     for i, (pair_name, sims) in enumerate(all_sim_results.items()):
-        layers = list(range(len(sims)))
-        ax.plot(layers, sims, marker=markers[i % len(markers)],
-                linestyle=linestyles[i % len(linestyles)],
-                label=pair_name, linewidth=2, markersize=7,
+        # 兼容旧格式 (list) 与新格式 (dict)
+        if isinstance(sims, dict):
+            cka = sims.get('cka', [])
+            cos = sims.get('cosine', [])
+        else:
+            cka, cos = sims, []
+        layers = list(range(len(cka)))
+        ax.plot(layers, cka, marker=markers[i % len(markers)], linestyle='-',
+                label=f'{pair_name} (CKA)', linewidth=2, markersize=7,
                 color=cmap(i))
+        if cos:
+            ax.plot(list(range(len(cos))), cos, marker=markers[i % len(markers)],
+                    linestyle=':', linewidth=1.2, markersize=4,
+                    alpha=0.55, color=cmap(i),
+                    label=f'{pair_name} (cos, ref)')
+        all_cka_vals.extend(cka)
 
     ax.set_xlabel('Layer')
-    ax.set_ylabel('Cosine Similarity')
-    ax.set_title('Fig 14. Representation Similarity Across Layers', fontsize=14, fontweight='bold')
-    ax.legend()
-    # Dynamic y-axis: min(all sims) - 0.02 to 1.01
-    all_vals = [s for sims in all_sim_results.values() for s in sims]
-    y_min = min(all_vals) - 0.02 if all_vals else 0
+    ax.set_ylabel('Similarity (Linear CKA, solid)')
+    ax.set_title('Fig 14. Layer-wise Representation Similarity (CKA)',
+                 fontsize=14, fontweight='bold')
+    y_min = min(all_cka_vals) - 0.02 if all_cka_vals else 0
     ax.set_ylim(max(y_min, 0), 1.01)
     ax.grid(True, alpha=0.3)
 
-    # [v6] Laitinen et al. literature reference (CKA metric, not directly comparable to cosine sim)
-    if all_vals:
-        n_layers = max(len(sims) for sims in all_sim_results.values())
+    # Laitinen et al. 文献参考 (同为 CKA, 数值可直接对照)
+    if all_cka_vals:
+        n_layers = max(
+            len(s['cka']) if isinstance(s, dict) else len(s)
+            for s in all_sim_results.values()
+        )
         mid_x = n_layers // 2
         ax.annotate(
-            'Ref: Laitinen et al.\nCKA drop 0.32–0.47\n(intermediate layers,\ndifferent metric)',
-            xy=(mid_x, y_min + 0.01), fontsize=7.5, color='gray', alpha=0.7,
+            'Ref: Laitinen et al.\nCKA drop 0.32–0.47\n(intermediate layers)',
+            xy=(mid_x, y_min + 0.01), fontsize=7.5, color='gray', alpha=0.75,
             ha='center', va='bottom', style='italic',
             bbox=dict(boxstyle='round,pad=0.3', fc='#f0f0f0', ec='gray', alpha=0.5))
 
-    ax.legend(fontsize=9)
+    ax.legend(fontsize=8, ncol=2)
     save_figure(fig, 'fig14_representation_similarity.png')
 
 
@@ -877,7 +921,8 @@ def run_module4():
         print(f"  Computing {pair_name}...")
         sims = layer_representation_similarity(stage_a, stage_b, tokenizer)
         all_sim[pair_name] = sims
-        print(f"    Layer sims: {[f'{s:.3f}' for s in sims]}")
+        print(f"    CKA   : {[f'{s:.3f}' for s in sims['cka']]}")
+        print(f"    cosine: {[f'{s:.3f}' for s in sims['cosine']]}")
 
     results['representation_similarity'] = all_sim
     plot_representation_similarity(all_sim)
@@ -988,11 +1033,12 @@ def run_module4():
         ])
     print_table(headers, rows)
 
-    print("\n  Representation Similarity (min per transition):")
+    print("\n  Representation Similarity (min CKA per transition):")
     for pair_name, sims in all_sim.items():
-        min_sim = min(sims)
-        min_layer = sims.index(min_sim)
-        print(f"    {pair_name}: min_sim={min_sim:.4f} @ layer {min_layer}")
+        cka_list = sims['cka'] if isinstance(sims, dict) else sims
+        min_sim = min(cka_list)
+        min_layer = cka_list.index(min_sim)
+        print(f"    {pair_name}: min_CKA={min_sim:.4f} @ layer {min_layer}")
 
     return results
 
